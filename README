@@ -3,6 +3,13 @@ Microwave: Control a microwave using an Arduino
 Alfredo Rius
 alfredo.rius@gmail.com
 
+v2.1   2017-12-12
+- Reset Display.
+- Change time while on operation.
+- Adjust time by 30 seconds.
+- Cleaned up code.
+- Shifted characters 1 space to the right.
+
 v2.0   2017-12-11
 - Code Rewrite.
 - Using timer interrupts.
