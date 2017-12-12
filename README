@@ -1,0 +1,17 @@
+Microwave: Control a microwave using an Arduino
+
+Alfredo Rius
+alfredo.rius@gmail.com
+
+v2.0   2017-12-11
+- Code Rewrite.
+- Using timer interrupts.
+
+v1.1   2017-12-02
+- Cleaned minimum time display.
+- Changed range of times.
+- Added button debounce.
+
+v1.0   2017-09-17
+- Recycled code from other project.
+- Developed in a hurry, but it works.
