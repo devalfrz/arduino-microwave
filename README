@@ -3,6 +3,11 @@ Microwave: Control a microwave using an Arduino
 Alfredo Rius
 alfredo.rius@gmail.com
 
+v3.0   2020-09-08
+ - Upgraded platform to Teensy 3.2
+ - Upgraded display to a 7-segment drived by a TM1637.
+ - Replaced potentiometer with an encoder.
+
 v2.1   2017-12-12
 - Reset Display.
 - Change time while on operation.
