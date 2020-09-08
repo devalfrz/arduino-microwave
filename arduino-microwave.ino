@@ -1,177 +1,211 @@
-/*
-  Microwave: Control a microwave using an Arduino
+/**
+    Microwave firmware
+    @file arduino-microwave.ino
+    @author Alfredo Rius
+    @email alfredo.rius@gmail.com
+    @version 3.0 2020-09-08
 
-  Alfredo Rius
-  alfredo.rius@gmail.com
+    Runs on a Teensy3.2 with a TM1637 7-segment Display Driver
+    and an encoder.
 
-  v2.1   2017-12-12
-  - Reset Display.
-  - Change time while on operation.
-  - Adjust time by 30 seconds.
-  - Cleaned up code.
-  - Shifted characters 1 space to the right.
-  
-  v2.0   2017-12-11
-  - Code Rewrite.
-  - Using timer interrupts.
-
-  v1.1   2017-12-02
-  - Cleaned minimum time display.
-  - Changed range of times.
-  - Added button debounce.
-
-  v1.0   2017-09-17
-  - Recycled code from other project.
-  - Developed in a hurry, but it works.
-
+    Controls the magnetron contactor and the light and fan relay.
 */
 
-#define BUTTON 3
-#define LIGHT A5
-#define GEN A4
-#define POT A0
-#define CHANGE_THR 30
-#define DEBOUNCE_FILTER 500
+#include <TM1637Display.h>
 
-#include <LiquidCrystal.h>
-#include <TimerOne.h>
+// Pinouts
+#define ENC_01 3   // Encoder CLK
+#define ENC_02 4   // Encoder direction
+#define ENC_SW 5   // Encoder push button
+#define DISP_CLK 6 // Display CLK
+#define DISP_DIO 7 // Display data I/O
+#define LIGHT 11   // Light and fan output
+#define GEN 12     // Magnetron outout
 
-LiquidCrystal lcd(4, 5, 7, 8, 12, 13);
+// End countdown (show "dOnE" for X seconds)
+#define END_COUNT 3
 
-#define ERR         0
-#define STAND_BY    1
-#define COUNTDOWN   2
-#define SHUTDOWN    3
-#define CANCEL      4
-uint8_t state = STAND_BY;
+// Countdown max 15:00
+#define COUNT_MAX 1500
 
-unsigned long debounceFilter = 0;
+// Brightness countdown
+#define BRIGHTNESS_COUNT 3000 //ms
+#define BRIGHTNESS_HIGH 4
+#define BRIGHTNESS_LOW 0
 
-unsigned long time_left;
-unsigned long last_t=0;
+// Debounce filter timeout (ms)
+#define DEBOUNCE_FILTER 30
+
+// Count timer
+unsigned int count = 130; // Start at 1:30
+unsigned int last_count = count; // Restart counter to last_count
+
+// Debounce filters
+unsigned long debounce_filter_enc = 0;
+unsigned long debounce_filter_sw = 0;
+
+// Update display if true
+uint8_t update_display = true;
+
+// Current status (0 inactive, 1 active)
+uint8_t state = 0;
+
+// Show "dOnE" message for X seconds if state is 1
+uint8_t end_count = END_COUNT;
+
+// Brightness countdown
+uint16_t brightness_count = BRIGHTNESS_COUNT;
+
+// Countdown Timer (1sec)
+IntervalTimer Timer;
+// Brightness Timer (1msec)
+IntervalTimer TimerBrightness;
+
+TM1637Display display(DISP_CLK, DISP_DIO);
+
+const uint8_t SEG_DONE[] = {
+  SEG_B | SEG_C | SEG_D | SEG_E | SEG_G,           // d
+  SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F,   // O
+  SEG_C | SEG_E | SEG_G,                           // n
+  SEG_A | SEG_D | SEG_E | SEG_F | SEG_G            // E
+};
+
+
+// Update display and set brightness.
+void updateDisplay(uint8_t brightness = BRIGHTNESS_HIGH){
+  display.setBrightness(brightness);
+  Serial.print(brightness);
+  Serial.print(" - ");
+  if(end_count == END_COUNT){ // Show current countdown
+    display.showNumberDecEx(count,0b11100000,true,4,0);
+    Serial.println(count);
+  }else{ // Show "dOnE"
+    display.setSegments(SEG_DONE);
+    Serial.println("dOnE");
+  }
+}
 
 
 void setup() {
-  // set up the LCD's number of columns and rows:
-  lcd.begin(16, 2);
-  pinMode(BUTTON, INPUT_PULLUP);
-  pinMode(GEN, OUTPUT);
-  pinMode(LIGHT, OUTPUT);
-  pinMode(POT, INPUT);
-  digitalWrite(LIGHT,LOW);
-  digitalWrite(GEN,LOW);
-  attachInterrupt(digitalPinToInterrupt(BUTTON), set, FALLING);
-  lcd.setCursor(0,0);
-  lcd.print("Microwave   v2.1");
-  lcd.setCursor(0,1);
-  lcd.print("                ");
-  delay(2000);
-  Timer1.initialize(1000000);
-  set_state(STAND_BY);
+  Serial.begin(115200);
+  pinMode(ENC_01,INPUT_PULLUP);
+  pinMode(ENC_02,INPUT_PULLUP);
+  pinMode(ENC_SW,INPUT_PULLUP);
+  pinMode(LIGHT,OUTPUT);
+  pinMode(GEN,OUTPUT);
+  attachInterrupt(digitalPinToInterrupt(ENC_01), encInt, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENC_SW), updateState, FALLING);
+  Timer.priority(0);
+  TimerBrightness.priority(1);
+  TimerBrightness.begin(countBrightness, 1000);
 }
 
 void loop() {
-  unsigned long t = get_time(analogRead(POT));
-  if(((last_t>CHANGE_THR && t<=last_t-CHANGE_THR) || t>=last_t+CHANGE_THR)){
-    last_t = t;
-    time_left = t;
-    display_time();
-    delay(100);
+  if(update_display){
+    brightness_count = BRIGHTNESS_COUNT;
+    updateDisplay(BRIGHTNESS_HIGH);
+    update_display = false;
+  }
+  delay(10);
+}
+
+// Encoder interrupt
+void encInt(){
+  if(debounce_filter_enc<millis()){
+    if(digitalRead(ENC_01)==digitalRead(ENC_02)){
+      if(state)
+        countInc(1);
+      else
+        countInc(30);
+    }else{
+      if(state){
+        if(count > 1)
+          countDec(1);
+      }else{
+        if(count > 30)
+          countDec(30);
+      }
+    }
+    if(!state)
+      last_count = count; // Reset to last position
+    debounce_filter_enc = millis()+DEBOUNCE_FILTER;
   }
 }
 
-void display_time(){
-  // Display the time
-  float tmp;
-  lcd.setCursor(1, 1);
-  lcd.print("               ");
-  lcd.setCursor(1, 1);
-  tmp = time_left/60;
-  if(tmp<10)
-    lcd.print("0");
-  lcd.print((int)tmp);
-  lcd.print(":");
-  tmp = time_left - ((time_left/60)*60);
-  if(tmp<10)
-    lcd.print("0");
-  lcd.print((int)tmp);
-}
-
-uint8_t set_state(uint8_t new_state){
-  // Sets the microwave to a specific state.
-  if(new_state == STAND_BY){
-    digitalWrite(LIGHT,LOW);
-    digitalWrite(GEN,LOW);
-    Timer1.detachInterrupt();
-    lcd.begin(16, 2);// Reset display
-    lcd.setCursor(0, 0);
-    lcd.print(" Set Time:      ");
-    time_left = get_time(analogRead(POT));
-    display_time();
-  }else if(new_state == SHUTDOWN || new_state == CANCEL){
-    lcd.setCursor(0,0);
-    if(new_state == SHUTDOWN)
-      lcd.print("     DONE!!!    ");
-    else
-      lcd.print("    STOPPED!    ");
-    lcd.setCursor(0,1);
-    lcd.print("                ");
-    time_left = 3;
-    digitalWrite(LIGHT,HIGH);
-    digitalWrite(GEN,LOW);
-  }else if(new_state == COUNTDOWN){
-    lcd.setCursor(0, 0);
-    lcd.print(" Time Left:     ");
-    time_left = get_time(analogRead(POT));
+void updateState() {
+  if(!state){
+    // Start countdown
+    state = 1;
+    Timer.begin(countStep, 1000000);
+    brightness_count = BRIGHTNESS_COUNT;
     digitalWrite(LIGHT,HIGH);
     digitalWrite(GEN,HIGH);
-    Timer1.attachInterrupt(countdown);
   }else{
-    return ERR;
+    // Turn off system and end coundown
+    state = 0;
+    Timer.end();
+    count = last_count;
+    update_display = true;
+    digitalWrite(LIGHT,LOW);
+    digitalWrite(GEN,LOW);
   }
-  state = new_state;
-  return new_state;
+  // Reset end coundown
+  end_count = END_COUNT;
 }
 
-
-long get_time(unsigned int pot){
-  // Calculate the time from the raw input.
-  if(pot<50){
-    return 30;
-  }else if(pot<800){
-    return map(pot,50,800,2,20)*30;
+// Countdown Step
+void countStep(){
+  if(count){
+    // Decrement countdown
+    countDec(1);
   }else{
-    return map(pot,800,1024,10,31)*60;
-  }
-}
-
-
-void set(){
-  // Push button interrupt
-  if(debounceFilter<millis()){
-    if(state == STAND_BY){
-      set_state(COUNTDOWN);
-    }else if(state == COUNTDOWN){
-      set_state(CANCEL);
-    }
-    debounceFilter = millis()+DEBOUNCE_FILTER;
-  }
-}
-
-void countdown(){
-  // Calculate countdown
-  if(state == COUNTDOWN){
-    if(time_left > 0){
-      time_left--;
-      display_time();
+    if(end_count){
+      // Show "dOnE" message
+      end_count --;
+      digitalWrite(GEN,LOW);
     }else{
-      set_state(SHUTDOWN);
+      // Turn off system and end coundown
+      state = 0;
+      Timer.end();
+      count = last_count;
+      end_count = END_COUNT;
+      digitalWrite(LIGHT,LOW);
     }
-  }else if(state == SHUTDOWN || state == CANCEL){
-    if(time_left > 0)
-      time_left--;
-    else
-      set_state(STAND_BY);
+    update_display = true;
+    digitalWrite(GEN,LOW);
   }
 }
 
+// Increment counter
+void countInc(uint8_t i){
+  // 100 = 1:00
+  if(count<COUNT_MAX){
+    if((count+40+i)%100 == 0){
+      count += 40+i;
+    }else{
+      count += i;
+    }
+  }
+  update_display = true;
+}
+
+// Decrement counter
+void countDec(uint8_t i){
+  // 100 = 1:00
+  if((count)%100 == 0){
+    count -= 40+i;
+  }else{
+    count -= i;
+  }
+  update_display = true;
+}
+
+// Set brightness to high for X mseconds.
+void countBrightness(){
+  if(brightness_count){
+    brightness_count--;
+    if(!brightness_count){
+      updateDisplay(BRIGHTNESS_LOW);
+    }
+  }
+}
